@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/alecthomas/assert/v2"
-	"github.com/alecthomas/kong"
+	"github.com/donvargax/kong"
 )
 
 func TestCustomWrap(t *testing.T) {

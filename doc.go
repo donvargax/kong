@@ -9,7 +9,7 @@
 //
 //	package main
 //
-//	import "github.com/alecthomas/kong"
+//	import "github.com/donvargax/kong"
 //
 //	var CLI struct {
 //	  Rm struct {

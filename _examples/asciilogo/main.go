@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/alecthomas/kong"
+	"github.com/donvargax/kong"
 )
 
 const logo = `

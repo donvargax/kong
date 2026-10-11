@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/alecthomas/assert/v2"
-	"github.com/alecthomas/kong"
+	"github.com/donvargax/kong"
 )
 
 func panicsTrue(t *testing.T, f func()) {

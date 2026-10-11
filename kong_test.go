@@ -13,7 +13,7 @@ import (
 	"github.com/alecthomas/assert/v2"
 	"github.com/alecthomas/repr"
 
-	"github.com/alecthomas/kong"
+	"github.com/donvargax/kong"
 )
 
 func mustNew(t *testing.T, cli any, options ...kong.Option) *kong.Kong {

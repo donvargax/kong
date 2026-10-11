@@ -6,7 +6,7 @@ import (
 
 	"github.com/alecthomas/assert/v2"
 
-	"github.com/alecthomas/kong"
+	"github.com/donvargax/kong"
 )
 
 // parseErrorAs parses args and returns the error it fails with, which must be a
