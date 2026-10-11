@@ -367,7 +367,11 @@ func (v *Value) Parse(scan *Scanner, target reflect.Value) (err error) {
 	}
 	err = v.Mapper.Decode(&DecodeContext{Value: v, Scan: scan}, target)
 	if err != nil {
-		return fmt.Errorf("%s: %w", v.ShortSummary(), err)
+		// The Mapper found no value to decode.
+		if missing, ok := err.(*MissingValueError); ok && missing.Value == nil {
+			return &MissingValueError{Value: v, Expected: missing.Expected, Token: missing.Token}
+		}
+		return &InvalidValueError{Value: v, Err: err}
 	}
 	v.Set = true
 	return nil
@@ -401,7 +405,7 @@ func (v *Value) Reset() error {
 			if ok {
 				err := v.Parse(ScanFromTokens(Token{Type: FlagValueToken, Value: envar}), v.Target)
 				if err != nil {
-					return fmt.Errorf("%s (from envar %s=%q)", err, env, envar)
+					return fmt.Errorf("%w (from envar %s=%q)", err, env, envar)
 				}
 				return nil
 			}

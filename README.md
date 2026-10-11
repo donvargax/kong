@@ -31,6 +31,7 @@
 - [Dynamic Commands](#dynamic-commands)
 - [Variable interpolation](#variable-interpolation)
 - [Validation](#validation)
+- [Handling parse errors](#handling-parse-errors)
 - [Modifying Kong's behaviour](#modifying-kongs-behaviour)
   - [`Name(help)` and `Description(help)` - set the application name description](#namehelp-and-descriptionhelp---set-the-application-name-description)
   - [`Configuration(loader, paths...)` - load defaults from configuration files](#configurationloader-paths---load-defaults-from-configuration-files)
@@ -690,6 +691,50 @@ type Validatable interface {
 
 If one of these nodes is in the active command-line it will be called during
 normal validation.
+
+## Handling parse errors
+
+`Parse()` returns a `*kong.ParseError` when it fails. When the command-line
+itself is at fault, the error it wraps has one of the following types, which
+can be retrieved with `errors.As`:
+
+| Type                            | Command-line problem                                                       |
+| ------------------------------- | -------------------------------------------------------------------------- |
+| `*kong.UnknownFlagError`        | A flag that is not defined.                                                |
+| `*kong.UnexpectedArgumentError` | An unknown command, or an extra positional argument.                       |
+| `*kong.UnexpectedTokenError`    | A token not valid where it occurs, eg. a value for a flag that takes none. |
+| `*kong.MissingValueError`       | A flag or positional argument missing its value.                           |
+| `*kong.InvalidValueError`       | A value that the flag or positional argument's mapper rejects.             |
+| `*kong.EnumError`               | A value that is not one of the enum values.                                |
+| `*kong.MissingFlagsError`       | Required flags that are missing.                                           |
+| `*kong.MissingPositionalsError` | Required positional arguments that are missing.                            |
+| `*kong.MissingCommandError`     | A required command or branching positional argument that is missing.       |
+| `*kong.XorFlagsError`           | More than one flag of an `xor` group.                                      |
+| `*kong.AndFlagsError`           | Some but not all flags of an `and` group.                                  |
+
+Each type carries the details of the problem, so an application can report it
+in its own way:
+
+```go
+ctx, err := parser.Parse(os.Args[1:])
+var unknownFlag *kong.UnknownFlagError
+var unexpected *kong.UnexpectedArgumentError
+switch {
+case errors.As(err, &unknownFlag):
+  fmt.Fprintf(os.Stderr, "no such flag %s\n", unknownFlag.Flag)
+  os.Exit(2)
+case errors.As(err, &unexpected) && unexpected.ExpectedCommand:
+  fmt.Fprintf(os.Stderr, "no such command %s\n", unexpected.Arg)
+  os.Exit(2)
+case err != nil:
+  parser.FatalIfErrorf(err)
+}
+```
+
+Their messages are unchanged, so printing them as before still works. Errors
+in the application's own definitions, such as an invalid tag, are not of these
+types, except that a mapper failing on a field of a type it does not support
+is reported as an `InvalidValueError`.
 
 ## Modifying Kong's behaviour
 

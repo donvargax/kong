@@ -157,22 +157,13 @@ func (s *Scanner) Pop() Token {
 	return arg
 }
 
-type expectedError struct {
-	context string
-	token   Token
-}
-
-func (e *expectedError) Error() string {
-	return fmt.Sprintf("expected %s value but got %q (%s)", e.context, e.token, e.token.InferredType())
-}
-
-// PopValue pops a value token, or returns an error.
+// PopValue pops a value token, or returns a *MissingValueError.
 //
 // "context" is used to assist the user if the value can not be popped, eg. "expected <context> value but got <type>"
 func (s *Scanner) PopValue(context string) (Token, error) {
 	t := s.Pop()
 	if !s.allowHyphenated && !t.IsValue() {
-		return t, &expectedError{context, t}
+		return t, &MissingValueError{Expected: context, Token: t}
 	}
 	return t, nil
 }

@@ -6,7 +6,6 @@ import (
 	"os"
 	"reflect"
 	"sort"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -587,10 +586,11 @@ func (c *Context) trace(node *Node) (err error) { //nolint: gocyclo
 			}
 
 		case FlagValueToken:
-			return fmt.Errorf("unexpected flag argument %q", token.Value)
+			return &UnexpectedTokenError{Token: token}
 
 		case PositionalArgumentToken:
 			candidates := []string{}
+			expectedCommand := false
 
 			// Ensure we've consumed all positional arguments.
 			if positional < len(node.Positional) {
@@ -634,6 +634,9 @@ func (c *Context) trace(node *Node) (err error) { //nolint: gocyclo
 
 			// After positional arguments have been consumed, check commands next...
 			for _, branch := range node.Children {
+				if branch.Type == CommandNode {
+					expectedCommand = true
+				}
 				if branch.Type == CommandNode && !branch.Hidden {
 					candidates = append(candidates, branch.Name)
 				}
@@ -677,9 +680,13 @@ func (c *Context) trace(node *Node) (err error) { //nolint: gocyclo
 				return c.trace(node.DefaultCmd)
 			}
 
-			return findPotentialCandidates(token.String(), candidates, "unexpected argument %s", token)
+			return &UnexpectedArgumentError{
+				Arg:             token.String(),
+				ExpectedCommand: expectedCommand,
+				Candidates:      closestCandidates(token.String(), candidates),
+			}
 		default:
-			return fmt.Errorf("unexpected token %s", token)
+			return &UnexpectedTokenError{Token: token}
 		}
 	}
 	return c.maybeSelectDefault(flags, node)
@@ -892,9 +899,9 @@ func (c *Context) parseFlag(flags []*Flag, match string) (err error) {
 		}
 		err := flag.Parse(c.scan, c.getValue(flag.Value))
 		if err != nil {
-			var expected *expectedError
-			if errors.As(err, &expected) && expected.token.InferredType().IsAny(FlagToken, ShortFlagToken) {
-				return fmt.Errorf("%s; perhaps try %s=%q?", err.Error(), flag.ShortSummary(), expected.token)
+			var missing *MissingValueError
+			if errors.As(err, &missing) && missing.Token.InferredType().IsAny(FlagToken, ShortFlagToken) {
+				return fmt.Errorf("%w; perhaps try %s=%q?", err, flag.ShortSummary(), missing.Token)
 			}
 			return err
 		}
@@ -904,18 +911,13 @@ func (c *Context) parseFlag(flags []*Flag, match string) (err error) {
 		})
 		return nil
 	}
-	return &unknownFlagError{Cause: findPotentialCandidates(match, candidates, "unknown flag %s", match)}
+	return &UnknownFlagError{Flag: match, Candidates: closestCandidates(match, candidates)}
 }
 
 func isUnknownFlagError(err error) bool {
-	var unknown *unknownFlagError
+	var unknown *UnknownFlagError
 	return errors.As(err, &unknown)
 }
-
-type unknownFlagError struct{ Cause error }
-
-func (e *unknownFlagError) Unwrap() error { return e.Cause }
-func (e *unknownFlagError) Error() string { return e.Cause.Error() }
 
 // Call an arbitrary function filling arguments with bound values.
 func (c *Context) Call(fn any, binds ...any) (out []any, err error) {
@@ -1032,11 +1034,16 @@ func flagChoiceGroups(flag *Flag) []choiceGroup {
 }
 
 func checkMissingFlags(flags []*Flag) error {
+	// A missing flag, or a group of flags joined by " or " or " and ".
+	type missingEntry struct {
+		text  string
+		flags []*Flag
+	}
 	choiceGroupSet := map[choiceGroup]bool{}
-	choiceGroups := map[choiceGroup][]string{}
+	choiceGroups := map[choiceGroup][]*Flag{}
 	andGroupSet := map[string]bool{}
-	andGroup := map[string][]string{}
-	missing := []string{}
+	andGroup := map[string][]*Flag{}
+	missing := []missingEntry{}
 	andGroupRequired := getRequiredAndGroupMap(flags)
 	for _, flag := range flags {
 		for _, and := range flag.And {
@@ -1059,23 +1066,30 @@ func checkMissingFlags(flags []*Flag) error {
 				if choiceGroupSet[group] {
 					continue
 				}
-				choiceGroups[group] = append(choiceGroups[group], flag.Summary())
+				choiceGroups[group] = append(choiceGroups[group], flag)
 			}
 			for _, and := range flag.And {
-				andGroup[and] = append(andGroup[and], flag.Summary())
+				andGroup[and] = append(andGroup[and], flag)
 			}
 		} else {
-			missing = append(missing, flag.Summary())
+			missing = append(missing, missingEntry{flag.Summary(), []*Flag{flag}})
 		}
+	}
+	joinSummaries := func(flags []*Flag, sep string) string {
+		summaries := make([]string, 0, len(flags))
+		for _, flag := range flags {
+			summaries = append(summaries, flag.Summary())
+		}
+		return strings.Join(summaries, sep)
 	}
 	for group, flags := range choiceGroups {
 		if !choiceGroupSet[group] && len(flags) > 1 {
-			missing = append(missing, strings.Join(flags, " or "))
+			missing = append(missing, missingEntry{joinSummaries(flags, " or "), flags})
 		}
 	}
 	for _, flags := range andGroup {
 		if len(flags) > 1 {
-			missing = append(missing, strings.Join(flags, " and "))
+			missing = append(missing, missingEntry{joinSummaries(flags, " and "), flags})
 		}
 	}
 
@@ -1083,9 +1097,20 @@ func checkMissingFlags(flags []*Flag) error {
 		return nil
 	}
 
-	sort.Strings(missing)
+	sort.Slice(missing, func(i, j int) bool { return missing[i].text < missing[j].text })
 
-	return fmt.Errorf("missing flags: %s", strings.Join(missing, ", "))
+	err := &MissingFlagsError{}
+	seen := map[*Flag]bool{}
+	for _, entry := range missing {
+		err.missing = append(err.missing, entry.text)
+		for _, flag := range entry.flags {
+			if !seen[flag] {
+				seen[flag] = true
+				err.Flags = append(err.Flags, flag)
+			}
+		}
+	}
+	return err
 }
 
 func getRequiredAndGroupMap(flags []*Flag) map[string]bool {
@@ -1101,17 +1126,13 @@ func getRequiredAndGroupMap(flags []*Flag) map[string]bool {
 }
 
 func checkMissingChildren(node *Node) error {
-	missing := []string{}
-
-	missingArgs := []string{}
+	missingArgs := []*Positional{}
 	for _, arg := range node.Positional {
 		if arg.Required && !arg.Set {
-			missingArgs = append(missingArgs, arg.Summary())
+			missingArgs = append(missingArgs, arg)
 		}
 	}
-	if len(missingArgs) > 0 {
-		missing = append(missing, strconv.Quote(strings.Join(missingArgs, " ")))
-	}
+	missing := []*Node{}
 
 	// A node with a Run() method may run on its own, so it does not require one
 	// of its subcommands to be selected.
@@ -1125,22 +1146,19 @@ func checkMissingChildren(node *Node) error {
 			if !child.Argument.Required {
 				continue
 			}
-			missing = append(missing, strconv.Quote(child.Summary()))
+			missing = append(missing, child)
 		} else if !runnable {
-			missing = append(missing, strconv.Quote(child.Name))
+			missing = append(missing, child)
 		}
 	}
-	if len(missing) == 0 {
+	switch {
+	case len(missing) > 0:
+		return &MissingCommandError{Candidates: missing, positionals: missingArgs}
+	case len(missingArgs) > 0:
+		return &MissingPositionalsError{Positionals: missingArgs, expected: true}
+	default:
 		return nil
 	}
-
-	if len(missing) > 5 {
-		missing = append(missing[:5], "...")
-	}
-	if len(missing) == 1 {
-		return fmt.Errorf("expected %s", missing[0])
-	}
-	return fmt.Errorf("expected one of %s", strings.Join(missing, ", "))
 }
 
 // If we're missing any positionals and they're required, return an error.
@@ -1155,7 +1173,7 @@ func checkMissingPositionals(positional int, values []*Value) error {
 		return nil
 	}
 
-	missing := []string{}
+	missing := []*Positional{}
 	for ; positional < len(values); positional++ {
 		arg := values[positional]
 		// TODO(aat): Fix hardcoding of these env checks all over the place :\
@@ -1164,12 +1182,12 @@ func checkMissingPositionals(positional int, values []*Value) error {
 				continue
 			}
 		}
-		missing = append(missing, "<"+arg.Name+">")
+		missing = append(missing, arg)
 	}
 	if len(missing) == 0 {
 		return nil
 	}
-	return fmt.Errorf("missing positional arguments %s", strings.Join(missing, " "))
+	return &MissingPositionalsError{Positionals: missing}
 }
 
 func checkEnum(value *Value, target reflect.Value) error {
@@ -1193,14 +1211,12 @@ func checkEnum(value *Value, target reflect.Value) error {
 	default:
 		enumSlice := value.EnumSlice()
 		v := fmt.Sprintf("%v", target)
-		enums := []string{}
 		for _, enum := range enumSlice {
 			if enum == v {
 				return nil
 			}
-			enums = append(enums, fmt.Sprintf("%q", enum))
 		}
-		return fmt.Errorf("%s must be one of %s but got %q", value.ShortSummary(), strings.Join(enums, ","), fmt.Sprintf("%v", target.Interface()))
+		return &EnumError{Value: value, Got: fmt.Sprintf("%v", target.Interface()), Allowed: enumSlice}
 	}
 }
 
@@ -1215,17 +1231,14 @@ func checkPassthroughArg(target reflect.Value) bool {
 }
 
 func checkXorDuplicatedAndAndMissing(paths []*Path) error {
-	errs := []string{}
+	errs := []error{}
 	if err := checkXorDuplicates(paths); err != nil {
-		errs = append(errs, err.Error())
+		errs = append(errs, err)
 	}
 	if err := checkAndMissing(paths); err != nil {
-		errs = append(errs, err.Error())
+		errs = append(errs, err)
 	}
-	if len(errs) > 0 {
-		return errors.New(strings.Join(errs, ", "))
-	}
-	return nil
+	return joinErrors(errs)
 }
 
 func checkXorDuplicates(paths []*Path) error {
@@ -1237,7 +1250,7 @@ func checkXorDuplicates(paths []*Path) error {
 			}
 			for _, xor := range flag.Xor {
 				if seen[xor] != nil {
-					return fmt.Errorf("--%s and --%s can't be used together", seen[xor].Name, flag.Name)
+					return &XorFlagsError{Group: xor, Flags: []*Flag{seen[xor], flag}}
 				}
 				seen[xor] = flag
 			}
@@ -1248,19 +1261,17 @@ func checkXorDuplicates(paths []*Path) error {
 
 func checkAndMissing(paths []*Path) error {
 	for _, path := range paths {
-		missingMsgs := []string{}
+		errs := []error{}
 		andGroups := map[string][]*Flag{}
 		for _, flag := range path.Flags {
 			for _, and := range flag.And {
 				andGroups[and] = append(andGroups[and], flag)
 			}
 		}
-		for _, flags := range andGroups {
+		for and, flags := range andGroups {
 			oneSet := false
 			notSet := []*Flag{}
-			flagNames := []string{}
 			for _, flag := range flags {
-				flagNames = append(flagNames, flag.Name)
 				if flag.Set {
 					oneSet = true
 				} else {
@@ -1268,33 +1279,14 @@ func checkAndMissing(paths []*Path) error {
 				}
 			}
 			if len(notSet) > 0 && oneSet {
-				missingMsgs = append(missingMsgs, fmt.Sprintf("--%s must be used together", strings.Join(flagNames, " and --")))
+				errs = append(errs, &AndFlagsError{Group: and, Flags: flags})
 			}
 		}
-		if len(missingMsgs) > 0 {
-			return fmt.Errorf("%s", strings.Join(missingMsgs, ", "))
+		if len(errs) > 0 {
+			return joinErrors(errs)
 		}
 	}
 	return nil
-}
-
-func findPotentialCandidates(needle string, haystack []string, format string, args ...any) error {
-	if len(haystack) == 0 {
-		return fmt.Errorf(format, args...)
-	}
-	closestCandidates := []string{}
-	for _, candidate := range haystack {
-		if strings.HasPrefix(candidate, needle) || levenshtein(candidate, needle) <= 2 {
-			closestCandidates = append(closestCandidates, fmt.Sprintf("%q", candidate))
-		}
-	}
-	prefix := fmt.Sprintf(format, args...)
-	if len(closestCandidates) == 1 {
-		return fmt.Errorf("%s, did you mean %s?", prefix, closestCandidates[0])
-	} else if len(closestCandidates) > 1 {
-		return fmt.Errorf("%s, did you mean one of %s?", prefix, strings.Join(closestCandidates, ", "))
-	}
-	return fmt.Errorf("%s", prefix)
 }
 
 type validatable interface{ Validate() error }
