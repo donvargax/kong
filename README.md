@@ -736,6 +736,14 @@ in the application's own definitions, such as an invalid tag, are not of these
 types, except that a mapper failing on a field of a type it does not support
 is reported as an `InvalidValueError`.
 
+To suggest what was meant in its own words, or for names Kong does not parse,
+such as the keys of a configuration file, an application can call
+`kong.Suggest(typed, candidates)`. It returns the candidates that start with
+what was typed or are within two edits of it, in the order given, as Kong
+suggests them for an unknown flag or command. When there are none, a word of
+five or more letters suggests the one candidate that all but its last letter
+begins, so `mutate` suggests `mutation`.
+
 ## Modifying Kong's behaviour
 
 Each Kong parser can be configured via functional options passed to `New(cli any, options...Option)`.
